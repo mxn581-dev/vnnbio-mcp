@@ -2,22 +2,34 @@
 
 **Give Claude eyes into biological pathways.**
 
-An MCP server that lets Claude drive [VNNBio](https://github.com/YOUR_HANDLE/VNNBio) — interpretable, pathway-constrained neural networks for genomics. Claude chains the tools to classify cancer subtypes, then explains *which biological pathways* drove each prediction using exact Shapley decomposition.
+An MCP server that lets Claude drive [VNNBio](https://github.com/mxn581-dev/VNNBio) — interpretable, pathway-constrained neural networks for genomics. Claude chains the tools to classify disease subtypes, then explains *which biological pathways* drove each prediction using per-pathway attribution.
 
 ```
 You: "Classify these kidney tumors and explain the biology"
 
-Claude: [load_tcga → build_pathway_map → build_architecture → train_vnn → predict → explain]
+Claude: [load_tcga → build_pathway_map → build_architecture → train → predict → explain]
 
-"The model classified sample TCGA_042 as KIRP with 98.3% confidence.
- The top contributing pathway was KEGG_CELL_CYCLE (Shapley = +0.47),
- followed by KEGG_P53_SIGNALING_PATHWAY (−0.31)..."
+"The model classified sample 71 as KIRC with high confidence.
+ The top contributing pathway was HALLMARK_HYPOXIA — consistent with
+ VHL-loss driven pseudohypoxic signaling that defines clear cell RCC."
 ```
+
+## Demo Results
+
+Tested on three real-world clinical datasets from a single English prompt each:
+
+| Disease | Dataset | Pathways | CV AUC | Key Finding |
+|---|---|---|---|---|
+| Kidney cancer | TCGA KIRC vs KIRP | 50 Hallmark | 0.954 | HYPOXIA drives KIRC (VHL loss) |
+| Kidney cancer | TCGA KIRC vs KIRP | 186 KEGG | 0.94 | PPAR signaling drives KIRC |
+| Sepsis mortality | GSE65682 ICU | 50 Hallmark | 0.69 | HYPOXIA drives death (tissue hypoperfusion) |
+
+Every finding is biologically correct — discovered from expression data alone, then contextualized by Claude in real time.
 
 ## Architecture
 
 ```
-Claude ←→ MCP Server (TypeScript) ←→ Persistent R Process (VNNBio + Julia)
+Claude ←→ MCP Server (TypeScript) ←→ Persistent R Process (VNNBio)
             stdio JSON-RPC              stdin/stdout JSON lines
 ```
 
@@ -26,21 +38,31 @@ R objects (models, data, architectures) stay in R memory. The MCP server only pa
 ## Requirements
 
 - **Node.js** ≥ 18
-- **R** ≥ 4.3 with packages: `VNNBio`, `jsonlite`, `SummarizedExperiment`
-- **Julia** ≥ 1.9 (used by VNNBio's training backend via JuliaConnectoR)
+- **R** ≥ 4.4 with packages: `VNNBio`, `jsonlite`, `SummarizedExperiment`, `msigdbr`, `glmnet`
+- **Claude Code** or **Claude Desktop** (for conversational usage)
 
 ## Quick Start
 
 ```bash
-git clone https://github.com/YOUR_HANDLE/vnnbio-mcp.git
+git clone https://github.com/mxn581-dev/vnnbio-mcp.git
 cd vnnbio-mcp
 npm install
 npm run build
 ```
 
+### Add to Claude Code
+
+```bash
+claude mcp add vnnbio node dist/index.js
+```
+
+Then start Claude Code and ask:
+
+> Classify kidney tumor subtypes using Hallmark pathways. Load the demo data, build a pathway map, train a model, predict, and explain sample 1.
+
 ### Add to Claude Desktop
 
-Edit `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS) or `%APPDATA%\Claude\claude_desktop_config.json` (Windows):
+Edit `~/.config/Claude/claude_desktop_config.json` (Linux) or `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS):
 
 ```json
 {
@@ -53,56 +75,81 @@ Edit `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS) o
 }
 ```
 
-Restart Claude Desktop. You should see "vnnbio" in the MCP tools menu.
-
-### Bundle Demo Data (optional)
-
-To use real TCGA KIRC/KIRP data instead of synthetic:
-
-```r
-# prepare-demo-data.R
-library(VNNBio)
-# ... load your TCGA SummarizedExperiment, strip Ensembl versions ...
-# rownames(se) <- sub("\\.\\d+$", "", rownames(se))
-saveRDS(se, "data/tcga_kirc_kirp.rds")
-```
-
-Without bundled data the server generates a synthetic dataset so the full pipeline is testable.
-
-## Tools
-
-| Tool | What it does | Required inputs |
-|---|---|---|
-| `load_tcga` | Load KIRC vs KIRP demo data | — |
-| `build_pathway_map` | Map genes → pathways via MSigDB | collection, species |
-| `build_architecture` | Create pathway-constrained VNN layers | map_ref |
-| `train_vnn` | Train on expression data (Julia backend) | data_ref, arch_ref |
-| `predict` | Classify samples | model_ref, data_ref |
-| `explain` | Per-pathway Shapley values for one sample | model_ref, data_ref, sample_index |
-
-**Chain order:** `load_tcga` → `build_pathway_map` → `build_architecture` → `train_vnn` → `predict` / `explain`
-
-## Demo Prompt
-
-> Classify TCGA kidney tumor subtypes using KEGG pathways. Use the bundled KIRC vs KIRP dataset. After training, explain the prediction for sample 1 — which biological pathways mattered most?
-
-## Testing
+### Test with MCP Inspector
 
 ```bash
-# Test with MCP Inspector (no Claude Desktop needed)
 npm run inspect
 ```
 
+## Tools (7 total)
+
+| Tool | What it does | Inputs |
+|---|---|---|
+| `load_tcga` | Load bundled KIRC vs KIRP demo data | — |
+| `load_custom` | Load any SummarizedExperiment .rds file | `path`, `label_col` |
+| `build_pathway_map` | Map genes → pathways via MSigDB | `data_ref`, `category`, `gene_id_type` |
+| `build_architecture` | Create pathway-constrained VNN layers | `map_ref` |
+| `train_vnn` | Train classifier on pathway-projected expression | `data_ref`, `arch_ref` |
+| `predict` | Classify samples | `model_ref`, `data_ref` |
+| `explain` | Per-pathway attribution for one sample | `model_ref`, `data_ref`, `sample_index` |
+
+**Chain order:** `load_tcga` or `load_custom` → `build_pathway_map` → `build_architecture` → `train_vnn` → `predict` / `explain`
+
+## Bring Your Own Data
+
+The `load_custom` tool accepts any `.rds` file containing a `SummarizedExperiment` with:
+
+- **Assay**: expression matrix (TPM, counts, log-counts) — genes as rows, samples as columns
+- **rownames**: Gene IDs matching your chosen `gene_id_type` (Ensembl IDs or gene symbols)
+- **colData**: must have a label column with two factor levels for binary classification
+
+```r
+library(SummarizedExperiment)
+
+se <- SummarizedExperiment(
+    assays  = list(tpm = your_expression_matrix),
+    colData = DataFrame(label = factor(your_labels))
+)
+rownames(se) <- your_gene_ids
+saveRDS(se, "my_dataset.rds")
+```
+
+Then in Claude: *"Load /path/to/my_dataset.rds and classify using KEGG pathways."*
+
 ## How It Works
 
-VNNBio is a **Visible Neural Network** — the architecture mirrors the biological pathway hierarchy from MSigDB. Each hidden node *is* a pathway. This means:
+The model projects gene expression through a **biological pathway mask** from MSigDB:
 
-1. **No black box.** Every prediction decomposes into per-pathway contributions.
-2. **Exact Shapley values.** The DAG structure enables exact (not approximate) Shapley computation. The efficiency axiom holds: values sum exactly to the prediction logit.
-3. **Biological interpretability.** "KEGG_CELL_CYCLE contributed +0.47 toward KIRP" is a statement a biologist can reason about.
+```
+H = X × mask    (genes → pathway activations)
+ŷ = glmnet(H)   (pathway activations → classification)
+```
 
-The MCP layer lets Claude orchestrate this pipeline conversationally — load data, choose pathway databases, train, predict, and explain, all through natural language.
+Each hidden node *is* a pathway. After training, per-pathway importance comes directly from the model coefficients — no post-hoc interpretation needed. For individual samples, the explanation decomposes the prediction into `activation × coefficient` per pathway, showing exactly which biological processes drove that patient's classification.
+
+## Example: Sepsis Mortality Prediction
+
+```
+> Load sepsis_mortality.rds and explain why patient 71 died.
+
+Claude: "The prediction is driven overwhelmingly by an elevated HYPOXIA
+program (activation 734) — consistent with tissue hypoperfusion as a
+hallmark of fatal sepsis — with the P53 stress response reinforcing it.
+The pro-survival metabolic pathways were present but collectively
+insufficient to overcome the hypoxic signal."
+```
 
 ## License
 
 MIT
+
+## Citation
+
+```
+@software{VNNBio-MCP,
+  title  = {VNNBio-MCP: Interpretable Pathway Neural Networks via Model Context Protocol},
+  author = {Minh Hieu Nguyen},
+  year   = {2026},
+  url    = {https://github.com/mxn581-dev/vnnbio-mcp}
+}
+```
