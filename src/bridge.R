@@ -83,6 +83,67 @@ handle_load_tcga <- function(params) {
   )
 }
 
+handle_load_custom <- function(params) {
+  path      <- params$path
+  label_col <- params$label_col %||% "label"
+
+  if (is.null(path) || nchar(trimws(path)) == 0) {
+    stop("'path' is required: absolute path to an .rds SummarizedExperiment file")
+  }
+  if (!file.exists(path)) {
+    stop("File not found: ", path)
+  }
+
+  log_msg("Loading custom data from ", path)
+  se <- readRDS(path)
+
+  # Validate it's a SummarizedExperiment
+  if (!is(se, "SummarizedExperiment")) {
+    stop("File does not contain a SummarizedExperiment. Got: ", class(se)[1])
+  }
+
+  # Check label column exists
+  cd <- SummarizedExperiment::colData(se)
+  if (!label_col %in% colnames(cd)) {
+    stop("label_col '", label_col, "' not found in colData. Available: ",
+         paste(colnames(cd), collapse = ", "))
+  }
+
+  # Check rownames
+  rn <- rownames(se)
+  if (is.null(rn) || all(is.na(rn))) {
+    # Try to recover from assay matrix
+    mat <- SummarizedExperiment::assay(se, 1)
+    if (!is.null(rownames(mat)) && !all(is.na(rownames(mat)))) {
+      rownames(se) <- rownames(mat)
+      log_msg("Recovered rownames from assay matrix")
+    } else {
+      stop("SE has no rownames (gene IDs). Set rownames(se) <- ensembl_ids before saving.")
+    }
+  }
+
+  n_samples <- ncol(se)
+  n_genes   <- nrow(se)
+  labels    <- as.character(cd[[label_col]])
+  class_tbl <- table(labels)
+
+  ref <- store_obj("data", se)
+
+  log_msg("Loaded: ", n_samples, " samples x ", n_genes, " genes, ",
+          length(class_tbl), " classes")
+
+  list(
+    ref        = ref,
+    n_samples  = n_samples,
+    n_genes    = n_genes,
+    classes    = as.list(class_tbl),
+    label_col  = label_col,
+    assay_name = SummarizedExperiment::assayNames(se)[1],
+    rownames_sample = head(rownames(se), 3),
+    gene_id_hint = if (any(grepl("^ENSG", head(rownames(se), 20)))) "ensembl" else "symbol"
+  )
+}
+
 handle_build_pathway_map <- function(params) {
   # Real API: buildMapFromMSigDB(species, category, subcategory,
   #              gene_id_type, feature_genes, min_pathway_size, max_pathway_size)
@@ -399,6 +460,7 @@ handle_explain <- function(params) {
 
 HANDLERS <- list(
   load_tcga          = handle_load_tcga,
+  load_custom        = handle_load_custom,
   build_pathway_map  = handle_build_pathway_map,
   build_architecture = handle_build_architecture,
   train_vnn          = handle_train_vnn,

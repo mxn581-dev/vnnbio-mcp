@@ -43,6 +43,30 @@ const TOOLS: Tool[] = [
     },
   },
   {
+    name: "load_custom",
+    description:
+      "Load a custom SummarizedExperiment from an .rds file on disk. " +
+      "The SE must have: (1) an expression assay (TPM, counts, etc.) with genes as rows, " +
+      "(2) Ensembl gene IDs as rownames (version-stripped, e.g. ENSG00000141510), " +
+      "(3) a label column in colData with two factor levels for binary classification. " +
+      "Use this instead of load_tcga when working with your own data.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        path: {
+          type: "string",
+          description: "Absolute path to the .rds file containing a SummarizedExperiment",
+        },
+        label_col: {
+          type: "string",
+          description: "Column name in colData to use as the class label (default: 'label')",
+          default: "label",
+        },
+      },
+      required: ["path"],
+    },
+  },
+  {
     name: "build_pathway_map",
     description:
       "Build a pathway-gene mapping from MSigDB gene set collections. " +
