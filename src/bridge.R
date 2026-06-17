@@ -402,6 +402,170 @@ handle_explain <- function(params) {
   )
 }
 
+handle_visualize <- function(params) {
+  plot_type    <- params$plot_type %||% "cohort_importance"
+  model_ref    <- params$model_ref
+  data_ref     <- params$data_ref
+  sample_index <- as.integer(params$sample_index %||% 1L)
+  top_n        <- as.integer(params$top_n %||% 17L)
+  output_dir   <- params$output_dir %||% file.path(getwd(), "figures")
+
+  if (!dir.exists(output_dir)) dir.create(output_dir, recursive = TRUE)
+
+  mod <- get_obj(model_ref)
+  se  <- get_obj(data_ref)
+
+  # Common data prep
+  assay_name <- SummarizedExperiment::assayNames(se)[1]
+  X <- t(as.matrix(SummarizedExperiment::assay(se, assay_name)))
+  X_aligned <- X[, mod$shared_genes, drop = FALSE]
+  H <- X_aligned %*% mod$mask
+  colnames(H) <- mod$pw_names
+
+  probs <- as.numeric(
+    stats::predict(mod$cv_fit, newx = H, s = "lambda.min", type = "response")
+  )
+  true_labels <- as.character(SummarizedExperiment::colData(se)$label)
+
+  if (plot_type == "cohort_importance") {
+    # ── Cohort-wide pathway importance bar chart ──
+    coefs <- mod$coefs
+    abs_coefs <- sort(abs(coefs), decreasing = TRUE)
+    top_pw <- head(names(abs_coefs), top_n)
+
+    plot_df <- data.frame(
+      pathway    = factor(top_pw, levels = rev(top_pw)),
+      importance = abs(coefs[top_pw]),
+      direction  = ifelse(coefs[top_pw] > 0,
+                          paste0("Higher -> ", mod$levels_y[2]),
+                          paste0("Higher -> ", mod$levels_y[1])),
+      stringsAsFactors = FALSE
+    )
+
+    p <- ggplot2::ggplot(plot_df, ggplot2::aes(x = pathway, y = importance, fill = direction)) +
+      ggplot2::geom_col(width = 0.7) +
+      ggplot2::coord_flip() +
+      ggplot2::scale_fill_manual(values = c(
+        setNames("#b2182b", paste0("Higher -> ", mod$levels_y[1])),
+        setNames("#2166ac", paste0("Higher -> ", mod$levels_y[2]))
+      )) +
+      ggplot2::labs(
+        title    = "Cohort-wide Hallmark pathway importance",
+        subtitle = sprintf("VNN trained on %d ICU patients (%s) | CV AUC %.2f",
+                           ncol(se),
+                           paste(names(table(true_labels)), table(true_labels),
+                                 sep = " ", collapse = " / "),
+                           mod$auc),
+        x = NULL, y = "|model coefficient|  (importance)", fill = NULL
+      ) +
+      ggplot2::theme_minimal(base_size = 13) +
+      ggplot2::theme(legend.position = "top")
+
+    fname <- file.path(output_dir, "cohort_pathway_importance.png")
+    ggplot2::ggsave(fname, p, width = 10, height = 7, dpi = 150)
+    log_msg("Saved cohort importance plot: ", fname)
+
+  } else if (plot_type == "patient_shapley") {
+    # ── Per-patient Shapley waterfall chart ──
+    x <- as.numeric(SummarizedExperiment::assay(se, assay_name)[mod$shared_genes, sample_index])
+    h <- as.numeric(x %*% mod$mask)
+    names(h) <- mod$pw_names
+    contributions <- h * mod$coefs
+
+    # Get GEO sample ID if available
+    sample_id <- colnames(se)[sample_index]
+    true_label <- true_labels[sample_index]
+    pred_prob <- probs[sample_index]
+
+    # Top pathways by |contribution|
+    ord <- order(abs(contributions), decreasing = TRUE)
+    top_idx <- head(ord, top_n)
+    top_pw <- names(contributions)[top_idx]
+
+    plot_df <- data.frame(
+      pathway      = factor(top_pw, levels = rev(top_pw)),
+      contribution = contributions[top_pw],
+      direction    = ifelse(contributions[top_pw] < 0,
+                            paste0("Pushes toward ", mod$levels_y[1]),
+                            paste0("Pushes toward ", mod$levels_y[2])),
+      stringsAsFactors = FALSE
+    )
+
+    # Determine death probability for display
+    p_class1 <- 1 - pred_prob  # P(class 0) = 1 - P(class 1)
+
+    p <- ggplot2::ggplot(plot_df, ggplot2::aes(x = pathway, y = contribution, fill = direction)) +
+      ggplot2::geom_col(width = 0.7) +
+      ggplot2::coord_flip() +
+      ggplot2::geom_hline(yintercept = 0, color = "gray40", linewidth = 0.3) +
+      ggplot2::scale_fill_manual(values = c(
+        setNames("#b2182b", paste0("Pushes toward ", mod$levels_y[1])),
+        setNames("#2166ac", paste0("Pushes toward ", mod$levels_y[2]))
+      )) +
+      ggplot2::labs(
+        title    = sprintf("Why the model predicted %s for patient %s (#%d)",
+                           ifelse(pred_prob > 0.5, mod$levels_y[2], mod$levels_y[1]),
+                           sample_id, sample_index),
+        subtitle = sprintf("True label: %s  |  P(%s) = %.2f  |  Shapley pathway attribution (Hallmark)",
+                           true_label, mod$levels_y[1], p_class1),
+        x = NULL, y = "Signed Shapley contribution  (logit scale)", fill = NULL
+      ) +
+      ggplot2::theme_minimal(base_size = 13) +
+      ggplot2::theme(legend.position = "top")
+
+    fname <- file.path(output_dir, sprintf("patient%d_shapley.png", sample_index))
+    ggplot2::ggsave(fname, p, width = 10, height = 7, dpi = 150)
+    log_msg("Saved patient Shapley plot: ", fname)
+
+  } else if (plot_type == "probability_distribution") {
+    # ── Probability distribution histogram ──
+    plot_df <- data.frame(
+      prob  = probs,
+      label = true_labels,
+      stringsAsFactors = FALSE
+    )
+
+    sample_id <- colnames(se)[sample_index]
+    sample_prob <- probs[sample_index]
+
+    p <- ggplot2::ggplot(plot_df, ggplot2::aes(x = prob, fill = label)) +
+      ggplot2::geom_histogram(bins = 30, alpha = 0.7, position = "identity") +
+      ggplot2::geom_vline(xintercept = 0.5, linetype = "dashed", color = "gray40") +
+      ggplot2::geom_vline(xintercept = sample_prob, color = "#b2182b", linewidth = 1) +
+      ggplot2::annotate("text", x = sample_prob, y = Inf, vjust = 2, hjust = -0.1,
+                        label = sprintf("Patient #%d", sample_index),
+                        color = "#b2182b", size = 3.5, fontface = "bold") +
+      ggplot2::scale_fill_manual(values = c(
+        setNames("#b2182b", mod$levels_y[1]),
+        setNames("#2166ac", mod$levels_y[2])
+      )) +
+      ggplot2::labs(
+        title    = "Predicted survival probability separates outcomes",
+        subtitle = sprintf("Patient #%d sits deep in the low-survival region the model learned",
+                           sample_index),
+        x = sprintf("Model P(%s)", mod$levels_y[2]),
+        y = "Number of patients",
+        fill = "True outcome"
+      ) +
+      ggplot2::theme_minimal(base_size = 13) +
+      ggplot2::theme(legend.position = "top")
+
+    fname <- file.path(output_dir, "probability_distribution.png")
+    ggplot2::ggsave(fname, p, width = 10, height = 6, dpi = 150)
+    log_msg("Saved probability distribution plot: ", fname)
+
+  } else {
+    stop("Unknown plot_type: '", plot_type,
+         "'. Use 'cohort_importance', 'patient_shapley', or 'probability_distribution'")
+  }
+
+  list(
+    plot_type = plot_type,
+    file_path = fname,
+    message   = paste0("Figure saved to ", fname)
+  )
+}
+
 # ── synthetic data with REAL gene IDs for pipeline testing ────────────────────
 
 .make_synthetic_se <- function(n_samples = 200L) {
@@ -465,7 +629,8 @@ HANDLERS <- list(
   build_architecture = handle_build_architecture,
   train_vnn          = handle_train_vnn,
   predict            = handle_predict,
-  explain            = handle_explain
+  explain            = handle_explain,
+  visualize          = handle_visualize
 )
 
 dispatch <- function(method, params) {

@@ -235,6 +235,49 @@ const TOOLS: Tool[] = [
       required: ["model_ref", "data_ref"],
     },
   },
+  {
+    name: "visualize",
+    description:
+      "Generate publication-quality figures from trained VNNBio models. " +
+      "Three plot types available: " +
+      "(1) 'cohort_importance' — bar chart of pathway coefficients showing which pathways " +
+      "the model learned as most important for classification across all patients. " +
+      "(2) 'patient_shapley' — waterfall chart showing per-pathway Shapley contributions " +
+      "for a specific patient, with red bars pushing toward one class and blue toward the other. " +
+      "(3) 'probability_distribution' — histogram of predicted probabilities for all patients, " +
+      "colored by true outcome, with a specific patient highlighted. " +
+      "Requires model_ref from train_vnn and data_ref from load_tcga/load_custom. " +
+      "Returns the file path of the saved PNG figure.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        plot_type: {
+          type: "string",
+          enum: ["cohort_importance", "patient_shapley", "probability_distribution"],
+          description: "Type of figure to generate",
+        },
+        model_ref: {
+          type: "string",
+          description: "Reference key from train_vnn (e.g. 'model_1')",
+        },
+        data_ref: {
+          type: "string",
+          description: "Reference key from load_tcga or load_custom (e.g. 'data_1')",
+        },
+        sample_index: {
+          type: "number",
+          description: "Patient index for patient_shapley and probability_distribution plots (default: 1)",
+          default: 1,
+        },
+        top_n: {
+          type: "number",
+          description: "Number of top pathways to show (default: 17)",
+          default: 17,
+        },
+      },
+      required: ["plot_type", "model_ref", "data_ref"],
+    },
+  },
 ];
 
 // ── Server setup ────────────────────────────────────────────────────────────
